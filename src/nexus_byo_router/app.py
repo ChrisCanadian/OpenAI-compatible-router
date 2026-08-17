@@ -29,16 +29,25 @@ def create_app(*, admin_token: str | None = None, service_token: str | None = No
         finally:
             await client.aclose()
 
-    app = FastAPI(title="OpenAI-Compatible Router", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="OpenAI-Compatible Router", version="0.2.0", lifespan=lifespan)
 
     async def require_admin(value: str | None):
         if not value or value != admin_token:
             raise HTTPException(status_code=401, detail="unauthorized")
 
-    def require_service(authorization: str | None):
-        expected = f"Bearer {service_token}"
-        if authorization != expected:
-            raise HTTPException(status_code=401, detail="unauthorized")
+    def resolve_route_token(authorization: str | None, x_validation_route: str | None) -> str:
+        # Two safe data-plane forms are supported:
+        # 1) service bearer + X-Validation-Route (gateway/service integration)
+        # 2) ephemeral route token directly as bearer (request-local runtime integration)
+        if authorization == f"Bearer {service_token}":
+            if not x_validation_route:
+                raise HTTPException(status_code=400, detail="missing validation route")
+            return x_validation_route
+        if authorization and authorization.startswith("Bearer "):
+            route_token = authorization[7:].strip()
+            if route_token and store.get(route_token) is not None:
+                return route_token
+        raise HTTPException(status_code=401, detail="unauthorized")
 
     @app.get("/health")
     async def health():
@@ -67,15 +76,21 @@ def create_app(*, admin_token: str | None = None, service_token: str | None = No
         store.delete(route_token)
         return None
 
+    @app.get("/internal/routes/{route_token}/usage")
+    async def route_usage(route_token: str, x_router_admin_token: str | None = Header(default=None)):
+        await require_admin(x_router_admin_token)
+        usage = store.usage(route_token)
+        if usage is None:
+            raise HTTPException(status_code=404, detail="route not found or expired")
+        return usage
+
     @app.get("/v1/models")
     async def list_models(
         authorization: str | None = Header(default=None),
         x_validation_route: str | None = Header(default=None),
     ):
-        require_service(authorization)
-        if not x_validation_route:
-            raise HTTPException(status_code=400, detail="missing validation route")
-        route = store.get(x_validation_route)
+        route_token = resolve_route_token(authorization, x_validation_route)
+        route = store.get(route_token)
         if route is None:
             raise HTTPException(status_code=401, detail="validation route is invalid or expired")
         return {
@@ -89,10 +104,8 @@ def create_app(*, admin_token: str | None = None, service_token: str | None = No
         authorization: str | None = Header(default=None),
         x_validation_route: str | None = Header(default=None),
     ):
-        require_service(authorization)
-        if not x_validation_route:
-            raise HTTPException(status_code=400, detail="missing validation route")
-        route = store.get(x_validation_route)
+        route_token = resolve_route_token(authorization, x_validation_route)
+        route = store.get(route_token)
         if route is None:
             raise HTTPException(status_code=401, detail="validation route is invalid or expired")
 
@@ -126,7 +139,9 @@ def create_app(*, admin_token: str | None = None, service_token: str | None = No
         try:
             req = client.build_request("POST", upstream_url, json=body, headers=upstream_headers)
             resp = await client.send(req, stream=wants_stream)
+            store.mark_request(route_token, upstream_status=resp.status_code)
         except httpx.HTTPError as exc:
+            store.mark_request(route_token, upstream_status=502)
             raise HTTPException(status_code=502, detail="upstream connection failed") from exc
 
         if wants_stream:

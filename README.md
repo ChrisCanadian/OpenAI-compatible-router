@@ -1,54 +1,49 @@
 # OpenAI-Compatible Router
 
-A small reusable BYO-provider routing service for OpenAI-compatible chat-completions endpoints.
+An original lightweight router for short-lived evaluator-supplied OpenAI-compatible providers.
 
-This repository is intentionally independent of Nexus Synapse. It exists as a recyclable infrastructure component that can sit between a caller and any OpenAI-compatible provider while keeping provider credentials short-lived and isolated.
+This is **not** based on Moon's unpublished router. It was designed independently for black-box validation and other short-lived BYO-provider use cases.
 
-The router supports:
+## Properties
 
-- short-lived in-memory routes;
-- per-route API keys and model locks;
-- standard text chat completions;
-- streaming SSE;
-- OpenAI-style `tools` / `tool_calls` pass-through;
-- `/v1/models` compatibility;
-- route expiry and deletion;
-- request ceilings;
-- secret redaction;
-- outbound endpoint validation / SSRF protection.
+- evaluator API keys are kept in memory only;
+- routes expire automatically and can be revoked explicitly;
+- the registered route hard-locks the upstream model ID;
+- streaming responses are proxied;
+- OpenAI-style tools/tool-calls pass through when the route permits them;
+- request body size and completion-token ceilings are enforced;
+- hosted mode rejects localhost/private/link-local/reserved upstream addresses to reduce SSRF risk;
+- upstream failures do not echo evaluator secrets;
+- an admin-only usage readback exposes request count/status for independent routing evidence without exposing the route token or upstream key.
 
-## Why a separate router?
+## Endpoints
 
-Separating model routing from the application using it creates a clean provider boundary:
+- `POST /internal/routes` — register a temporary upstream route (admin only).
+- `GET /internal/routes/{route_token}/usage` — public-safe route-usage readback (admin only).
+- `DELETE /internal/routes/{route_token}` — revoke a route (admin only).
+- `POST /v1/chat/completions` — OpenAI-compatible proxy endpoint.
+- `GET /v1/models` — return the model locked to the current route.
+- `GET /health` — liveness.
+
+## Data-plane authentication
+
+Version `0.2.0` supports two equivalent service-side forms.
+
+A dedicated service can use its own bearer plus the opaque route header:
 
 ```text
-caller
-  |
-  v
-OpenAI-Compatible Router
-  |
-  +-- temporary route A --> provider/model A
-  +-- temporary route B --> provider/model B
-  +-- temporary route C --> provider/model C
+Authorization: Bearer <router service token>
+X-Validation-Route: <opaque temporary route token>
 ```
 
-Applications can target the router without learning or persisting the evaluator's provider credential.
+A request-scoped private adapter can instead use the temporary route token directly as the bearer:
 
-The initial Nexus black-box validation work uses this pattern so an evaluator can bring an OpenAI-compatible provider/model without the public validation gateway paying for inference or exposing private runtime assembly logic.
-
-## Run
-
-```bash
-python -m pip install -e .
-uvicorn nexus_byo_router.app:app --host 127.0.0.1 --port 8091
+```text
+Authorization: Bearer <opaque temporary route token>
 ```
 
-## Security model
+The direct bearer form exists so an ordinary OpenAI-compatible client can be pointed at the router without teaching that client a proprietary routing header. In either form, the route token is consumed by the router and is **never** forwarded upstream. The evaluator's provider receives only its own API credential.
 
-Provider credentials are held only in process memory for the lifetime of a route. They are not written to SQLite, files, evidence artifacts, or response bodies.
+## Security note
 
-Public deployments should put the router's route-management interface behind a trusted private network or authenticated gateway. See `SECURITY.md`.
-
-## Status
-
-v0.1.0 reference implementation.
+Treat route tokens as short-lived secrets. Keep the admin interface on a private network, use temporary provider keys with narrow spending limits, and apply edge rate limits when the data plane is Internet reachable.
