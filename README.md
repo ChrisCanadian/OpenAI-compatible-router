@@ -47,3 +47,7 @@ The direct bearer form exists so an ordinary OpenAI-compatible client can be poi
 ## Security note
 
 Treat route tokens as short-lived secrets. Keep the admin interface on a private network, use temporary provider keys with narrow spending limits, and apply edge rate limits when the data plane is Internet reachable.
+
+## Attribution and provenance
+
+See [`ATTRIBUTION.md`](ATTRIBUTION.md) for local authorship, independent implementation lineage, external-component boundaries, and the reference that informed this repository's compact provenance practice.
